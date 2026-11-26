@@ -283,6 +283,30 @@ def verarbeiten(bild_bgr, leser, voc, args, interaktiv=True):
     return form
 
 
+def terminal_taste():
+    """Taste aus dem Terminal lesen, ohne zu warten (nur Windows). Sonst None."""
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    if not msvcrt.kbhit():
+        return None
+    z = msvcrt.getwch()
+    if z in ('\r', '\n'):
+        return ord(' ')
+    return ord(z.lower()) if len(z) == 1 else None
+
+
+def fenster_nach_vorne(cv2, fenster):
+    """Kamerafenster wieder in den Vordergrund holen (Fokus war im Terminal)."""
+    try:
+        cv2.setWindowProperty(fenster, cv2.WND_PROP_TOPMOST, 1)
+        cv2.waitKey(1)
+        cv2.setWindowProperty(fenster, cv2.WND_PROP_TOPMOST, 0)
+    except cv2.error:
+        pass
+
+
 def kamera_schleife(leser, voc, args):
     import cv2
     cam = cv2.VideoCapture(args.kamera)
@@ -290,6 +314,8 @@ def kamera_schleife(leser, voc, args):
         sys.exit('Kamera {} nicht gefunden. Andere Nummer mit --kamera 1 probieren.'.format(args.kamera))
     fenster = 'PicassoBot - Karte (Leertaste = lesen, M = von Hand, Q = Ende)'
     status = 'Karte in den Rahmen halten, Leertaste'
+    print('\nBereit. Leertaste/Enter = Karte lesen, M = von Hand, Q = Ende '
+          '(im Kamerafenster oder hier im Terminal).')
     while True:
         ok, bild = cam.read()
         if not ok:
@@ -300,18 +326,29 @@ def kamera_schleife(leser, voc, args):
         cv2.putText(anzeige, status, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
         cv2.imshow(fenster, anzeige)
         taste = cv2.waitKey(1) & 0xFF
+        if taste == 255:
+            taste = terminal_taste() or 255
         if taste in (ord('q'), 27):
             break
+        if taste not in (ord(' '), ord('m')):
+            continue
         if taste == ord(' '):
             print('\nKarte erkannt?')
             form = verarbeiten(bild, leser, voc, args)
-            status = 'Gesendet: {}'.format(form) if form else 'Nochmal: Karte in den Rahmen, Leertaste'
-        if taste == ord('m'):
+            status = 'Gesendet: {} - naechste Karte, Leertaste'.format(form) if form \
+                else 'Nochmal: Karte in den Rahmen, Leertaste'
+        else:
             wort = input('\nForm von Hand: ').strip().lower()
             if wort in shapes.SHAPES and not args.nicht_senden:
                 senden(wort, args.roboter, args.port)
+                status = 'Gesendet: {} - naechste Karte, Leertaste'.format(wort)
             elif wort not in shapes.SHAPES:
                 print('  Unbekannt. Verfügbar: ' + ', '.join(sorted(shapes.SHAPES)))
+        # alte Bilder aus dem Kamerapuffer verwerfen und Fenster wieder nach vorne holen
+        for _ in range(5):
+            cam.grab()
+        fenster_nach_vorne(cv2, fenster)
+        print('\nBereit für die nächste Karte (Leertaste/Enter).')
     cam.release()
     cv2.destroyAllWindows()
 
