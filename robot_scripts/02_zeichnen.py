@@ -20,6 +20,7 @@ Starten:
     python3 02_zeichnen.py              # zeichnen
     python3 02_zeichnen.py --dry-run    # nur URScript anzeigen
     python3 02_zeichnen.py --list       # Formen auflisten
+    python3 02_zeichnen.py --karte      # Wort vom Laptop empfangen (karte_lesen.py), Tastatur geht weiterhin
 """
 
 import argparse
@@ -248,6 +249,63 @@ def choose_shape():
         print('  Unbekannt, bitte nochmal.')
 
 
+class KartenEmpfang:
+    """Wartet gleichzeitig auf ein Wort vom Laptop (karte_lesen.py, per TCP)
+    und auf die Tastatur. Was zuerst kommt, gewinnt.
+    Protokoll: Laptop schickt 'wort\\n', Roboter antwortet 'OK wort' oder 'ERR text'."""
+
+    def __init__(self, port):
+        import socket
+        self.port = port
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind(('0.0.0.0', port))   # Container hat network_mode: host
+        self.server.listen(1)
+
+    def close(self):
+        self.server.close()
+
+    def wait(self):
+        import select
+        names = sorted(shapes.SHAPES)
+        print('\nWarte auf Karte vom Laptop (Port {}) ... oder hier eintippen:'.format(self.port))
+        print('  ' + ', '.join(names))
+        print('  q = beenden')
+        quellen = [self.server, sys.stdin]
+        while True:
+            print('Karte / Name / Nummer: ', end='', flush=True)
+            ready, _, _ = select.select(quellen, [], [])
+            if sys.stdin in ready:                                   # Tastatur
+                zeile = sys.stdin.readline()
+                if zeile == '':                  # keine Tastatur (z. B. im Hintergrund gestartet)
+                    quellen = [self.server]
+                    continue
+                answer = zeile.strip().lower()
+                if answer in ('q', 'quit', 'exit'):
+                    return None
+                if answer.isdigit() and 1 <= int(answer) <= len(names):
+                    return names[int(answer) - 1]
+                if answer in shapes.SHAPES:
+                    return answer
+                print('  Unbekannt, bitte nochmal.')
+                continue
+
+            conn, addr = self.server.accept()                        # Laptop
+            conn.settimeout(5.0)
+            try:
+                word = conn.recv(256).decode('utf-8', 'replace').strip().lower()
+                if word in shapes.SHAPES:
+                    conn.sendall('OK {}\n'.format(word).encode())
+                    print('\nKarte vom Laptop ({}): {}'.format(addr[0], word))
+                    return word
+                conn.sendall('ERR unbekannte Form: {}\n'.format(word).encode())
+                print('\n  Laptop schickte unbekanntes Wort "{}" - ignoriert.'.format(word))
+            except OSError as e:
+                print('\n  Verbindung zum Laptop fehlgeschlagen: {}'.format(e))
+            finally:
+                conn.close()
+
+
 def go_to_wait(robot, draw_dz):
     print('Fahre zur Warteposition über dem Nullpunkt ...')
     robot.move_joints(cfg.HOME_JOINTS, v=cfg.SPEED_TRAVEL)
@@ -255,11 +313,11 @@ def go_to_wait(robot, draw_dz):
                              dz=draw_dz + cfg.WAIT_LIFT, linear=False, v=cfg.SPEED_TRAVEL)
 
 
-def draw_loop(robot, draw_dz, preset=None):
+def draw_loop(robot, draw_dz, preset=None, karte=None):
     field_report()
     go_to_wait(robot, draw_dz)
     while True:
-        name = preset or choose_shape()
+        name = preset or (karte.wait() if karte else choose_shape())
         preset = None
         if name is None:
             break
@@ -337,6 +395,8 @@ def main():
     parser.add_argument('--ip', help='Roboter-IP (überschreibt ROS-Parameter robot_ip)')
     parser.add_argument('--dry-run', action='store_true', help='Befehle nur anzeigen')
     parser.add_argument('--list', action='store_true', help='Formen auflisten')
+    parser.add_argument('--karte', nargs='?', const=5005, type=int, metavar='PORT',
+                        help='Wort vom Laptop (karte_lesen.py) empfangen, Standard-Port 5005')
     try:
         import rospy
         argv = rospy.myargv()[1:]
@@ -368,7 +428,12 @@ def main():
         if args.hoehe:
             calibrate_height(robot)
         else:
-            draw_loop(robot, draw_dz, preset=args.shape and args.shape.lower())
+            karte = KartenEmpfang(args.karte) if args.karte else None
+            try:
+                draw_loop(robot, draw_dz, preset=args.shape and args.shape.lower(), karte=karte)
+            finally:
+                if karte:
+                    karte.close()
 
 
 if __name__ == '__main__':
